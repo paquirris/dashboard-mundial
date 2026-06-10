@@ -232,6 +232,11 @@
     <span id="alert-text"></span>
   </div>
 
+  <!-- Evento del día -->
+  <div id="evento-hoy" style="display:flex;align-items:center;gap:8px;margin-bottom:1rem;padding:.75rem 1rem;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);">
+    <span style="color:var(--text3);font-size:12px">Cargando evento...</span>
+  </div>
+
   <div class="summary-row">
     <div class="summary-card">
       <div class="summary-label">Personas estimadas</div>
@@ -388,9 +393,9 @@ function toObjects(rows) {
 }
 
 // ── LÓGICA DE DEMANDA AUTOMÁTICA ─────────────────────────────────
-function calcDemanda(aforo, capacidad) {
-  if (!aforo || !capacidad) return 'sin';
-  const pct = aforo / capacidad;
+function calcDemanda(aforo, aforo_esperado) {
+  if (!aforo || !aforo_esperado) return 'sin';
+  const pct = aforo / aforo_esperado;
   if (pct >= 1.0) return 'critica';
   if (pct >= 0.80) return 'alta';
   if (pct >= 0.60) return 'media';
@@ -398,6 +403,42 @@ function calcDemanda(aforo, capacidad) {
 }
 function getPct(aforo, cap) {
   return cap > 0 ? Math.round((aforo/cap)*100) : 0;
+}
+
+// ── EVENTO DEL DÍA ────────────────────────────────────────────────
+function getEventoHoy(eventos) {
+  const hoy = new Date();
+  const yyyy = hoy.getFullYear();
+  const mm   = String(hoy.getMonth()+1).padStart(2,'0');
+  const dd   = String(hoy.getDate()).padStart(2,'0');
+  const hoyStr = `${yyyy}-${mm}-${dd}`;
+  // Busca evento cuya fecha_hora_local empiece con la fecha de hoy
+  return eventos.find(e => (e.fecha_hora_local||e.fecha||'').startsWith(hoyStr)) || null;
+}
+
+function filtrarVenuesHoy(venues, eventoHoy) {
+  if (!eventoHoy) return venues; // Sin evento: mostrar todos
+  // venue_ids del evento separados por coma o espacio
+  const ids = (eventoHoy.venue_ids||eventoHoy.venues||'')
+    .split(/[,\s]+/).map(x=>x.trim().toLowerCase()).filter(Boolean);
+  if (!ids.length) return venues;
+  return venues.filter(v => ids.includes((v.venue_id||'').toLowerCase()));
+}
+
+function renderEventoHoy(evento) {
+  const el = document.getElementById('evento-hoy');
+  if (!el) return;
+  if (!evento) {
+    el.innerHTML = '<span style="color:var(--text3);font-size:12px">Sin evento programado hoy</span>';
+    return;
+  }
+  const partido = evento.partido || evento.nombre || '—';
+  const hora    = (evento.fecha_hora_local||evento.fecha||'').split(' ')[1] || '';
+  el.innerHTML = `
+    <span class="venue-tag tag-partido" style="margin-right:8px">HOY</span>
+    <strong style="font-size:14px">${partido}</strong>
+    ${hora ? `<span style="color:var(--text3);font-size:12px;margin-left:8px">${hora}</span>` : ''}
+  `;
 }
 
 // ── RENDER HELPERS ────────────────────────────────────────────────
@@ -419,17 +460,17 @@ function numCls(pres, rec) {
 }
 
 // ── RENDER VENUES ─────────────────────────────────────────────────
-function renderVenues(venues, latest) {
+function renderVenues(venues, latest, totalVenues) {
   let totalPersonas=0, totalUnidades=0, totalEnCamino=0, activos=0, criticos=0, deficitTotal=0;
   const alerts=[];
 
   const html = venues.map(v => {
-    const rep = latest[v.venue_id] || {};
-    const aforo = parseInt(rep.aforo_estimado)||0;
-    const cap   = parseInt(v.capacidad)||1;
-    const pres  = parseInt(rep.unidades_presentes)||0;
-    const cam   = parseInt(rep.unidades_en_camino)||0;
-    const rec   = parseInt(v.unidades_recomendadas)||0;
+    const rep  = latest[v.venue_id] || {};
+    const aforo= parseInt(rep.aforo_estimado)||0;
+    const cap  = parseInt(v.aforo_esperado_evento)||parseInt(v.capacidad)||1;
+    const pres = parseInt(rep.unidades_presentes)||0;
+    const cam  = parseInt(rep.unidades_en_camino)||0;
+    const rec  = parseInt(v.unidades_recomendadas)||0;
     const isActive = aforo > 0;
     const demanda  = isActive ? calcDemanda(aforo, cap) : 'sin';
     const pct      = getPct(aforo, cap);
@@ -460,7 +501,7 @@ function renderVenues(venues, latest) {
       <div class="aforo-section">
         <div class="aforo-header">
           <span class="aforo-count">${aforo.toLocaleString('es-MX')}</span>
-          <span class="aforo-cap">/ ${cap.toLocaleString('es-MX')}</span>
+          <span class="aforo-cap">/ ${cap.toLocaleString('es-MX')} esperado</span>
           <span class="aforo-pct pct-${demanda}">${pct}%</span>
         </div>
         <div class="progress-track">
@@ -505,7 +546,7 @@ function renderVenues(venues, latest) {
   document.getElementById('s-unidades').textContent  = totalUnidades.toLocaleString('es-MX');
   document.getElementById('s-unidades-sub').textContent = `+ en camino: ${totalEnCamino}`;
   document.getElementById('s-venues').textContent    = activos;
-  document.getElementById('s-venues-sub').textContent= `de ${venues.length} programados`;
+  document.getElementById('s-venues-sub').textContent= `de ${totalVenues||venues.length} en catálogo`;
   document.getElementById('s-deficit').textContent   = deficitTotal;
   document.getElementById('s-criticos').textContent  = criticos;
 
@@ -557,12 +598,14 @@ async function fetchData() {
   const errBox = document.getElementById('error-box');
   errBox.style.display = 'none';
   try {
-    const [vRows, rRows] = await Promise.all([
-      readRange('venues!A:H'),
-      readRange('reportes!A:F')
+    const [vRows, rRows, eRows] = await Promise.all([
+      readRange('venues!A:I'),
+      readRange('reportes!A:F'),
+      readRange('eventos!A:F')
     ]);
-    const venues  = toObjects(vRows);
-    const reportes= toObjects(rRows);
+    const venues   = toObjects(vRows);
+    const reportes = toObjects(rRows);
+    const eventos  = toObjects(eRows);
 
     // Mapa venue_id → datos del catálogo
     const venueMap = {};
@@ -572,7 +615,14 @@ async function fetchData() {
     const latest = {};
     reportes.forEach(r => { if (r.venue_id) latest[r.venue_id] = r; });
 
-    renderVenues(venues, latest);
+    // Evento de hoy
+    const eventoHoy = getEventoHoy(eventos);
+    renderEventoHoy(eventoHoy);
+
+    // Filtrar venues activos según evento del día
+    const venuesActivos = filtrarVenuesHoy(venues, eventoHoy);
+
+    renderVenues(venuesActivos, latest, venues.length);
     renderReportes(reportes, venueMap);
 
     const now = new Date();
